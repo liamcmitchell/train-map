@@ -12,8 +12,9 @@ Built with:
 ## Development
 
 ```bash
-python3 build.py           # Download and process
-python3 build.py --help    # See all options
+python3 build.py --help
+python3 build.py
+python3 -m http.server 8000
 ```
 
 ## Architecture
