@@ -2,6 +2,8 @@
 
 Interactive map of German train connections.
 
+<img width="547" height="515" alt="image" src="https://github.com/user-attachments/assets/1c5b228e-7592-45cb-96c9-7d730b4dff41" />
+
 Built with:
 
 - [Python](https://python.org)
