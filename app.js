@@ -3,6 +3,7 @@ let data;
 let markers = {};
 let selectedStation = null;
 let connectedStations = new Map();
+let lastMouseover = { id: null, time: 0 };
 
 function getTimeColor(minutes) {
     const hue = 90 - Math.pow(minutes / 360, 0.4) * 90;
@@ -113,10 +114,22 @@ function initMarkers() {
         
         hitArea.on('click', (e) => {
             L.DomEvent.stopPropagation(e);
+            marker.openTooltip();
+
+            if (selectedStation === i) {
+                return;
+            }
+
+            if (connectedStations.has(i) && lastMouseover.id === i && Date.now() - lastMouseover.time < 20) {
+                // We're probably on mobile, don't select connected station on first click.
+                return;
+            }
+ 
             selectStation(i, false, false);
         });
         
         hitArea.on('mouseover', () => {
+            lastMouseover = { id: i, time: Date.now() };
             marker.setStyle({ weight: DEFAULT_STYLE.weight + 1 });
             marker.openTooltip();
         });
@@ -277,6 +290,7 @@ function selectStation(index, center = true, animate = true) {
     const name = data.names[index];
     
     markers[index].setStyle(SELECTED_STYLE);
+    markers[index].openTooltip();
     
     if (center) {
         map.setView([lat, lon], 10, { animate });
@@ -298,6 +312,8 @@ function selectStation(index, center = true, animate = true) {
             ...CONNECTED_STYLE,
             fillColor: color
         });
+
+        markers[destIdx].setTooltipContent(`${data.names[destIdx]}: ${time} min`);
     }
     
     updateHash();
@@ -310,6 +326,7 @@ function clearSelection() {
     
     connectedStations.forEach((time, idx) => {
         markers[idx].setStyle(DEFAULT_STYLE);
+        markers[idx].setTooltipContent(data.names[idx]);
         markers[idx].closeTooltip();
     });
     connectedStations.clear();
