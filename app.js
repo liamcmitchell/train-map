@@ -341,10 +341,17 @@ function selectStation(index, center = true, animate = true) {
 
 		markers[destIdx].setStyle(getMarkerStyle(destIdx));
 
-		markers[destIdx].setTooltipContent(`${data.names[destIdx]}: ${time} min`);
+		markers[destIdx].setTooltipContent(`${data.names[destIdx]}: ${formatTime(time)}`);
 	}
 
 	updateHash();
+}
+
+function formatTime(minutes) {
+	if (minutes < 60) return `${minutes} min`;
+	const hours = Math.floor(minutes / 60);
+	const mins = minutes % 60;
+	return mins === 0 ? `${hours}h` : `${hours}h ${mins}m`;
 }
 
 function clearSelection() {
