@@ -9,9 +9,11 @@ import csv
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import zipfile
+from collections import defaultdict
 from datetime import date, datetime
 from pathlib import Path
 from urllib.request import urlretrieve
@@ -162,28 +164,95 @@ def build_station_mapping(zip_path: Path) -> tuple:
                 stop_id = row["stop_id"]
                 location_type = int(row.get("location_type", 0) or 0)
                 parent = row.get("parent_station", "")
+                name = row["stop_name"]
+                
+                # Filter out platform-specific stations (narrow gauge codes and P numbers)
+                if should_filter_station(name):
+                    continue
                 
                 if location_type == 1:
                     # This is a station
                     stations[stop_id] = {
-                        "name": row["stop_name"],
+                        "name": name,
                         "lat": round(float(row["stop_lat"]), 5),
                         "lon": round(float(row["stop_lon"]), 5),
                     }
                     stop_to_station[stop_id] = stop_id
                 elif parent:
-                    # Platform with parent - map to parent
+                    # Platform with parent - map to parent (includes "Gleis" platforms)
                     stop_to_station[stop_id] = parent
                 else:
                     # Standalone stop - use as-is
                     stations[stop_id] = {
-                        "name": row["stop_name"],
+                        "name": name,
                         "lat": round(float(row["stop_lat"]), 5),
                         "lon": round(float(row["stop_lon"]), 5),
                     }
                     stop_to_station[stop_id] = stop_id
     
     return stop_to_station, stations
+
+
+def should_filter_station(name: str) -> bool:
+    """Filter out stations with platform-specific metadata patterns.
+    
+    Filters out:
+    - Narrow gauge platform codes (e.g., Bek_Klb, Wdk_Wdh, Eld_Ab)
+    - Platform numbers (e.g., " P1", " P7")
+    
+    Note: "Gleis" filtering is handled separately with location_type awareness
+    to avoid filtering legitimate heritage/narrow-gauge station names.
+    """
+    # Match narrow gauge platform codes: uppercase_uppercase (e.g., Bek_Klb, Eld_Ab)
+    if re.search(r'[A-Z]{2,}_[A-Z]', name):
+        return True
+    
+    # Match platform numbers: space + P + digit (e.g., " P1", " P7")
+    if re.search(r' P\d', name):
+        return True
+    
+    return False
+
+
+def deduplicate_stations(stations: dict) -> tuple[dict, dict, list]:
+    """Deduplicate stations based on proximity (same coordinates within 0.001 degrees ~100m).
+    
+    Returns: (deduped_stations, old_to_new_mapping, deduplication_log)
+    """
+    # Filter out stations with platform metadata patterns
+    filtered = {sid: info for sid, info in stations.items() if not should_filter_station(info['name'])}
+    
+    groups = defaultdict(list)
+    for sid, info in filtered.items():
+        # Group by rounded coordinates (0.001 degree ~ 100m at mid-latitudes)
+        key = (round(info['lat'], 3), round(info['lon'], 3))
+        groups[key].append(sid)
+    
+    deduped = {}
+    old_to_new = {}
+    dedups = []  # List of (merged_stations, chosen_station)
+    
+    for group in groups.values():
+        if len(group) == 1:
+            sid = group[0]
+            deduped[sid] = stations[sid]
+            old_to_new[sid] = sid
+        else:
+            # Choose station with "Hauptbahnhof" in name if available, else first
+            chosen = group[0]
+            for sid in group:
+                if "Hauptbahnhof" in stations[sid]['name']:
+                    chosen = sid
+                    break
+            deduped[chosen] = stations[chosen]
+            for sid in group:
+                old_to_new[sid] = chosen
+            
+            # Log this deduplication
+            merged_names = [stations[sid]['name'] for sid in group if sid != chosen]
+            dedups.append((merged_names, stations[chosen]['name']))
+    
+    return deduped, old_to_new, dedups
 
 
 def extract_connections(zip_path: Path, stop_to_station: dict) -> dict:
@@ -285,12 +354,19 @@ def process(force: bool = False):
     
     all_stations = {}  # station_id -> {name, lat, lon}
     all_stop_to_station = {}  # stop_id -> station_id
+    filtered_count = 0  # Stations filtered by pattern
     
     for feed_id in ["fv", "rv"]:
         zip_path = DATA_DIR / f"{feed_id}.zip"
         print(f"    Processing {feed_id}...")
         
         stop_to_station, stations = build_station_mapping(zip_path)
+        
+        # Filter out platform-specific stations
+        for sid in list(stations.keys()):
+            if should_filter_station(stations[sid]['name']):
+                del stations[sid]
+                filtered_count += 1
         
         # Merge
         for stop_id, station_id in stop_to_station.items():
@@ -299,9 +375,28 @@ def process(force: bool = False):
         for station_id, info in stations.items():
             if station_id not in all_stations:
                 all_stations[station_id] = info
-            # Keep first occurrence (could add deduplication logic here)
+            # Keep first occurrence
     
-    print(f"    Total unique stations: {len(all_stations)}")
+    if filtered_count > 0:
+        print(f"    Filtered out {filtered_count} platform-specific stations")
+    
+    # Deduplicate stations based on proximity
+    all_stations, old_to_new, dedups = deduplicate_stations(all_stations)
+    
+    # Log deduplications
+    if dedups:
+        print(f"\n  Deduplication results ({len(dedups)} groups merged):")
+        for merged_names, chosen_name in sorted(dedups):
+            for merged in merged_names:
+                print(f"    '{merged}' → '{chosen_name}'")
+    
+    # Update stop_to_station mappings
+    for stop_id, station_id in all_stop_to_station.items():
+        mapped = old_to_new.get(station_id, station_id)
+        if mapped in all_stations:  # Only include if station wasn't filtered
+            all_stop_to_station[stop_id] = mapped
+    
+    print(f"    Total unique stations after filtering & dedup: {len(all_stations)}")
     
     # Extract connections from both feeds
     print("\n  Extracting connections...")
