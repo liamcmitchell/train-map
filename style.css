@@ -101,3 +101,7 @@ body {
 #loading.hidden {
 	display: none;
 }
+
+.leaflet-tile-pane {
+	opacity: 0.6;
+}

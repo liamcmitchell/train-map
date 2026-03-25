@@ -3,35 +3,9 @@ let data;
 let markers = {};
 let selectedStation = null;
 let connectedStations = new Map();
-let lastMouseover = { id: null, time: 0 };
-
-function getTimeColor(minutes) {
-	const hue = 90 - Math.pow(minutes / 360, 0.4) * 90;
-	return `hsl(${Math.max(0, hue)}, 70%, 50%)`;
-}
-
-const DEFAULT_STYLE = {
-	radius: 4,
-	fillColor: "#999999",
-	color: "#ffffff",
-	weight: 2,
-	fillOpacity: 1,
-};
-
-const SELECTED_STYLE = {
-	radius: 6,
-	fillColor: "#0078A8",
-	color: "#ffffff",
-	weight: 2,
-	fillOpacity: 1,
-};
-
-const CONNECTED_STYLE = {
-	radius: 6,
-	color: "#ffffff",
-	weight: 2,
-	fillOpacity: 1,
-};
+let hoverStation = null;
+let hoverTime = 0;
+let zoom = 6;
 
 async function init() {
 	const loading = document.getElementById("loading");
@@ -75,7 +49,7 @@ function updateHash() {
 }
 
 function initMap() {
-	map = L.map("map", { preferCanvas: true }).setView([51.1657, 10.4515], 6);
+	map = L.map("map", { preferCanvas: true }).setView([51.1657, 10.4515], zoom);
 
 	const attribution = [
 		'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -90,6 +64,11 @@ function initMap() {
 	map.on("click", () => {
 		clearSelection();
 	});
+
+	map.on("zoomend", () => {
+		zoom = map.getZoom();
+		updateMarkers();
+	});
 }
 
 function initMarkers() {
@@ -99,7 +78,7 @@ function initMarkers() {
 	for (let i = 0; i < names.length; i++) {
 		const [lat, lon] = coords[i];
 
-		const marker = L.circleMarker([lat, lon], DEFAULT_STYLE);
+		const marker = L.circleMarker([lat, lon], getMarkerStyle(i));
 		marker.bindTooltip(names[i], {
 			permanent: false,
 			direction: "top",
@@ -126,8 +105,8 @@ function initMarkers() {
 
 			if (
 				connectedStations.has(i) &&
-				lastMouseover.id === i &&
-				Date.now() - lastMouseover.time < 20
+				hoverStation === i &&
+				Date.now() - hoverTime < 20
 			) {
 				// We're probably on mobile, don't select connected station on first click.
 				return;
@@ -137,18 +116,56 @@ function initMarkers() {
 		});
 
 		hitArea.on("mouseover", () => {
-			lastMouseover = { id: i, time: Date.now() };
-			marker.setStyle({ weight: DEFAULT_STYLE.weight + 1 });
+			hoverStation = i;
+			hoverTime = Date.now();
+			marker.setStyle(getMarkerStyle(i));
 			marker.openTooltip();
 		});
 
 		hitArea.on("mouseout", () => {
+			hoverStation = null;
 			marker.closeTooltip();
-			marker.setStyle({ weight: DEFAULT_STYLE.weight });
+			marker.setStyle(getMarkerStyle(i));
 		});
 
 		hitArea.addTo(map);
 	}
+}
+
+function updateMarkers() {
+	for (let i = 0; i < data.names.length; i++) {
+		markers[i].setStyle(getMarkerStyle(i));
+	}
+}
+
+function getTimeColor(minutes) {
+	const hue = 90 - Math.pow(minutes / 360, 0.4) * 90;
+	return `hsl(${Math.max(0, hue)}, 70%, 50%)`;
+}
+
+function getMarkerStyle(i) {
+	const hover = hoverStation === i;
+	const selected = selectedStation === i;
+	const connected = connectedStations.has(i);
+	const visible = selected || connected;
+	const radius = Math.max(
+		visible ? 3 : 0.5,
+		Math.min(16, zoom) - (visible ? 6 : 10),
+	);
+	const weight = hover ? 2 : visible ? 1 : 0;
+	const opacity = visible ? 1 : Math.max(0, Math.min(1, zoom / 4 - 1));
+	return {
+		radius: radius + weight / 2,
+		fillColor: selected
+			? "#0078A8"
+			: connected
+				? getTimeColor(connectedStations.get(i))
+				: "#333",
+		fillOpacity: opacity,
+		color: hover ? "#fff" : "#333",
+		opacity,
+		weight,
+	};
 }
 
 function initSearch() {
@@ -304,7 +321,7 @@ function selectStation(index, center = true, animate = true) {
 	const [lat, lon] = data.coords[index];
 	const name = data.names[index];
 
-	markers[index].setStyle(SELECTED_STYLE);
+	markers[index].setStyle(getMarkerStyle(index));
 	markers[index].openTooltip();
 
 	if (center) {
@@ -319,14 +336,10 @@ function selectStation(index, center = true, animate = true) {
 	for (let i = 0; i < edges.length; i++) {
 		const destIdx = edges[i];
 		const time = times[i];
-		const color = getTimeColor(time);
 
 		connectedStations.set(destIdx, time);
 
-		markers[destIdx].setStyle({
-			...CONNECTED_STYLE,
-			fillColor: color,
-		});
+		markers[destIdx].setStyle(getMarkerStyle(destIdx));
 
 		markers[destIdx].setTooltipContent(`${data.names[destIdx]}: ${time} min`);
 	}
@@ -337,16 +350,17 @@ function selectStation(index, center = true, animate = true) {
 function clearSelection() {
 	if (selectedStation === null) return;
 
-	markers[selectedStation].setStyle(DEFAULT_STYLE);
-
-	connectedStations.forEach((time, idx) => {
-		markers[idx].setStyle(DEFAULT_STYLE);
-		markers[idx].setTooltipContent(data.names[idx]);
-		markers[idx].closeTooltip();
-	});
-	connectedStations.clear();
+	const cleared = [selectedStation, ...connectedStations.keys()];
 
 	selectedStation = null;
+	connectedStations.clear();
+
+	cleared.forEach((idx) => {
+		markers[idx].setStyle(getMarkerStyle(idx));
+		markers[idx].closeTooltip();
+		markers[idx].setTooltipContent(data.names[idx]);
+	});
+
 	document.getElementById("search-input").value = "";
 
 	updateHash();
