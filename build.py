@@ -6,14 +6,11 @@ Downloads GTFS feeds from GTFS.de and processes them into data.json
 
 import argparse
 import csv
-import hashlib
 import json
-import os
 import re
 import shutil
 import sys
 import zipfile
-from collections import defaultdict
 from math import cos, radians
 from datetime import date, datetime
 from pathlib import Path
@@ -37,116 +34,48 @@ FEEDS = {
 }
 
 
-def download_feed(feed_id: str, force: bool = False) -> Path:
-    """Download a GTFS feed if it doesn't exist or force=True."""
-    feed = FEEDS[feed_id]
-    zip_path = DATA_DIR / f"{feed_id}.zip"
-
-    if zip_path.exists() and not force:
-        print(
-            f"  {feed['name']}: Already downloaded ({zip_path.stat().st_size:,} bytes)"
-        )
-        return zip_path
-
-    print(f"  {feed['name']}: Downloading...")
-    print(f"    from {feed['url']}")
-
-    try:
-        temp_path, headers = urlretrieve(feed["url"])
-    except URLError as e:
-        print(f"    ERROR: Failed to download: {e}")
-        sys.exit(1)
-
-    actual_size = Path(temp_path).stat().st_size
-    content_length = headers.get("Content-Length")
-
-    print(f"    Downloaded {actual_size:,} bytes")
-
-    if content_length:
-        expected = int(content_length)
-        if abs(actual_size - expected) > 1000:
-            print(
-                f"    WARNING: Size mismatch. Expected ~{expected:,}, got {actual_size:,}"
-            )
-
-    if actual_size < feed["expected_size"] * 0.5:
-        print(f"    ERROR: File suspiciously small. Aborting.")
-        sys.exit(1)
-
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    shutil.move(temp_path, zip_path)
-    print(f"    Saved to {zip_path}")
-
-    return zip_path
-
-
-def validate_zip(zip_path: Path, feed_id: str) -> dict:
-    """Validate a downloaded zip and return info about its contents."""
-    print(f"\n  Validating {zip_path.name}...")
-
-    required_files = ["stops.txt", "stop_times.txt", "trips.txt"]
-
-    try:
-        with zipfile.ZipFile(zip_path) as zf:
-            names = zf.namelist()
-            print(f"    Contains {len(names)} files")
-
-            for req in required_files:
-                if req not in names:
-                    print(f"    ERROR: Missing required file: {req}")
-                    sys.exit(1)
-                print(f"    ✓ {req}")
-
-            return {"valid": True, "files": names}
-    except zipfile.BadZipFile as e:
-        print(f"    ERROR: Invalid ZIP file: {e}")
-        sys.exit(1)
-
-
-def validate_stops(zip_path: Path, feed_id: str) -> dict:
-    """Parse stops.txt and return stats."""
-    print(f"\n  Analyzing stops in {feed_id}...")
-
-    stations = []
-    stops_without_parent = []
-    platforms = []
-
-    with zipfile.ZipFile(zip_path) as zf:
-        with zf.open("stops.txt") as f:
-            reader = csv.DictReader(f.read().decode("utf-8").splitlines())
-            for row in reader:
-                location_type = int(row.get("location_type", 0) or 0)
-
-                if location_type == 1:
-                    stations.append(row)
-                elif row.get("parent_station"):
-                    platforms.append(row)
-                else:
-                    stops_without_parent.append(row)
-
-    print(f"    Stations (location_type=1): {len(stations)}")
-    print(f"    Platforms (with parent_station): {len(platforms)}")
-    print(f"    Standalone stops (no parent): {len(stops_without_parent)}")
-
-    return {
-        "stations": stations,
-        "platforms": platforms,
-        "standalone": stops_without_parent,
-        "total": len(stations) + len(platforms) + len(stops_without_parent),
-    }
-
-
-def download_all(force: bool = False):
-    """Download all feeds."""
+def download(force: bool = False):
+    """Download all feeds. Validates after download."""
     print("\nDownloading GTFS feeds")
 
-    for feed_id in ["fv", "rv"]:
+    for feed_id in FEEDS:
         feed = FEEDS[feed_id]
-        print(f"\n[{feed['name']}]")
-        zip_path = download_feed(feed_id, force)
-        validate_zip(zip_path, feed_id)
-        stops_info = validate_stops(zip_path, feed_id)
-        FEEDS[feed_id]["stops_info"] = stops_info
+        print(f"\n  {feed['name']}:")
+
+        zip_path = DATA_DIR / f"{feed_id}.zip"
+
+        if zip_path.exists() and not force:
+            print(f"    Already downloaded ({zip_path.stat().st_size:,} bytes)")
+        else:
+            print(f"    Downloading from {feed['url']}")
+
+            try:
+                temp_path, headers = urlretrieve(feed["url"])
+            except URLError as e:
+                print(f"    ERROR: Failed to download: {e}")
+                sys.exit(1)
+
+            actual_size = Path(temp_path).stat().st_size
+
+            print(f"    Downloaded {actual_size:,} bytes")
+
+            DATA_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.move(temp_path, zip_path)
+            print(f"    Saved to {zip_path}")
+
+        required_files = ["stops.txt", "stop_times.txt", "trips.txt"]
+        try:
+            with zipfile.ZipFile(zip_path) as zf:
+                names = zf.namelist()
+                print(f"    Contains {len(names)} files")
+                for req in required_files:
+                    if req not in names:
+                        print(f"    ERROR: Missing required file: {req}")
+                        sys.exit(1)
+                    print(f"    ✓ {req}")
+        except zipfile.BadZipFile as e:
+            print(f"    ERROR: Invalid ZIP file: {e}")
+            sys.exit(1)
 
 
 def parse_time(time_str: str) -> int:
@@ -312,7 +241,7 @@ def get_version_from_feeds() -> str:
     """Get version from zip file modification times."""
     latest_mtime = None
 
-    for feed_id in ["fv", "rv"]:
+    for feed_id in FEEDS:
         zip_path = DATA_DIR / f"{feed_id}.zip"
         if not zip_path.exists():
             continue
@@ -332,14 +261,14 @@ def process(force: bool = False):
     print("\nProcessing connections")
 
     latest_zip_mtime = 0
-    for feed_id in ["fv", "rv"]:
+    for feed_id in FEEDS:
         zip_path = DATA_DIR / f"{feed_id}.zip"
         if zip_path.exists():
             latest_zip_mtime = max(latest_zip_mtime, zip_path.stat().st_mtime)
 
     if DATA_FILE.exists() and not force:
         if DATA_FILE.stat().st_mtime >= latest_zip_mtime:
-            print(f"\n  data.json is up to date. Use --force to reprocess.")
+            print("\n  data.json is up to date. Use --force to reprocess.")
             return
 
     # Build station mappings from both feeds
@@ -349,7 +278,7 @@ def process(force: bool = False):
     stop_to_station = {}  # stop_id -> station_id
     filtered_count = 0
 
-    for feed_id in ["fv", "rv"]:
+    for feed_id in FEEDS:
         zip_path = DATA_DIR / f"{feed_id}.zip"
         print(f"  Processing {feed_id}...")
 
@@ -371,17 +300,15 @@ def process(force: bool = False):
                         stations[stop_id] = {
                             "sid": stop_id,
                             "name": name,
-                            "type": int(row.get("location_type", 0) or 0),
                             "lat": round(float(row["stop_lat"]), 5),
                             "lon": round(float(row["stop_lon"]), 5),
-                            "source": feed_id,
                         }
                         stop_to_station[stop_id] = stop_id
 
     if filtered_count > 0:
         print(f"  Filtered out {filtered_count} stations")
 
-    PROXIMITY_THRESHOLD_KM = 0.15  # 100m
+    PROXIMITY_THRESHOLD_KM = 0.15
 
     station_list = list(stations.values())
     station_list.sort(key=lambda x: x["lat"])
@@ -400,13 +327,13 @@ def process(force: bool = False):
                 continue
             result = compare_stations(info["name"], info2["name"])
             if result == 0:
-                print(f"  '{info['name']}' ≠ '{info2['name']}'")
+                print(f"    {info['name']} ≠ {info2['name']}")
             elif result < 0:
                 dedups[sid2] = sid1
-                print(f"  '{info2['name']}' → '{info['name']}'")
+                print(f"    {info2['name']} → {info['name']}")
             else:
                 dedups[sid1] = sid2
-                print(f"  '{info['name']}' → '{info2['name']}'")
+                print(f"    {info['name']} → {info2['name']}")
 
     print(f"  Total unique stations after filtering & dedup: {len(stations)}")
 
@@ -414,9 +341,9 @@ def process(force: bool = False):
 
     all_connections = {}  # (station_a, station_b) -> min_time
 
-    for feed_id in ["fv", "rv"]:
+    for feed_id in FEEDS:
         zip_path = DATA_DIR / f"{feed_id}.zip"
-        print(f"    Processing {feed_id}...")
+        print(f"    Processing {FEEDS[feed_id]['name']}...")
 
         connections = extract_connections(zip_path, stop_to_station)
 
@@ -507,13 +434,10 @@ def process(force: bool = False):
 def main():
     parser = argparse.ArgumentParser(description="Train Map Builder")
     parser.add_argument(
-        "--force", "-f", action="store_true", help="Force re-download of existing files"
+        "--force", "-f", action="store_true", help="Force re-download or re-processing"
     )
     parser.add_argument(
         "--download-only", action="store_true", help="Only download, skip processing"
-    )
-    parser.add_argument(
-        "--validate-only", action="store_true", help="Only validate existing downloads"
     )
     parser.add_argument(
         "--process-only",
@@ -522,20 +446,8 @@ def main():
     )
     args = parser.parse_args()
 
-    if args.validate_only:
-        print("\nValidating downloads")
-        for feed_id in ["fv", "rv"]:
-            zip_path = DATA_DIR / f"{feed_id}.zip"
-            if not zip_path.exists():
-                print(f"\n  {feed_id}: No file found at {zip_path}")
-                continue
-            validate_zip(zip_path, feed_id)
-            validate_stops(zip_path, feed_id)
-        print("\n  Validation complete.")
-        return
-
     if not args.process_only:
-        download_all(force=args.force)
+        download(force=args.force)
 
     if not args.download_only:
         process(force=args.force)
