@@ -6,6 +6,8 @@ Downloads GTFS feeds from GTFS.de and processes them into data.json
 
 import argparse
 import csv
+import gzip
+import io
 import json
 import re
 import shutil
@@ -161,82 +163,6 @@ def compare_stations(name1: str, name2: str) -> int:
     return len(name2) - len(name1)
 
 
-def extract_connections(zip_path: Path, stop_to_station: dict) -> dict:
-    """Extract connections from stop_times.txt.
-
-    A 'direct' connection means reachable without transfers.
-    So all stations on the same route/trip are directly connected to each other.
-    """
-    from itertools import combinations
-
-    connections = {}  # (station_a, station_b) -> min_time_minutes
-
-    with zipfile.ZipFile(zip_path) as zf:
-        with zf.open("stop_times.txt") as f:
-            reader = csv.DictReader(f.read().decode("utf-8").splitlines())
-
-            trips = {}
-            for row in reader:
-                trip_id = row["trip_id"]
-                if trip_id not in trips:
-                    trips[trip_id] = []
-                trips[trip_id].append(
-                    {
-                        "stop_id": row["stop_id"],
-                        "sequence": int(row["stop_sequence"]),
-                        "arrival": row["arrival_time"],
-                        "departure": row["departure_time"],
-                    }
-                )
-
-    print(f"    Processing {len(trips):,} trips...")
-
-    for trip_id, stops in trips.items():
-        stops.sort(key=lambda x: x["sequence"])
-
-        trip_stations = []
-        for stop in stops:
-            station = stop_to_station.get(stop["stop_id"])
-            if station and (not trip_stations or trip_stations[-1] != station):
-                trip_stations.append(station)
-
-        if len(trip_stations) < 2:
-            continue
-
-        for a, b in combinations(trip_stations, 2):
-            a_idx = next(
-                (
-                    i
-                    for i, s in enumerate(stops)
-                    if stop_to_station.get(s["stop_id"]) == a
-                ),
-                None,
-            )
-            b_idx = next(
-                (
-                    i
-                    for i, s in enumerate(stops)
-                    if stop_to_station.get(s["stop_id"]) == b
-                ),
-                None,
-            )
-
-            if a_idx is None or b_idx is None:
-                continue
-
-            earlier_idx, later_idx = min(a_idx, b_idx), max(a_idx, b_idx)
-            earlier_dep = parse_time(stops[earlier_idx]["departure"])
-            later_arr = parse_time(stops[later_idx]["arrival"])
-            travel_time = later_arr - earlier_dep
-
-            if 1 <= travel_time <= 480:
-                key = (a, b)
-                if key not in connections or travel_time < connections[key]:
-                    connections[key] = travel_time
-
-    return connections
-
-
 def get_version_from_feeds() -> str:
     """Get version from zip file modification times."""
     latest_mtime = None
@@ -296,12 +222,15 @@ def process(force: bool = False):
 
                     if parent:
                         stop_to_station[stop_id] = parent
+                        if parent in stations:
+                            stations[parent].setdefault("stops", []).append(stop_id)
                     elif stop_id not in stations:
                         stations[stop_id] = {
                             "sid": stop_id,
                             "name": name,
                             "lat": round(float(row["stop_lat"]), 5),
                             "lon": round(float(row["stop_lon"]), 5),
+                            "stops": [stop_id],
                         }
                         stop_to_station[stop_id] = stop_id
 
@@ -313,7 +242,7 @@ def process(force: bool = False):
     station_list = list(stations.values())
     station_list.sort(key=lambda x: x["lat"])
 
-    dedups = {}
+    dedup_count = 0
     for i, info in enumerate(station_list):
         for j in range(i + 1, len(station_list)):
             info2 = station_list[j]
@@ -323,19 +252,31 @@ def process(force: bool = False):
             if dist > PROXIMITY_THRESHOLD_KM:
                 break
             sid1, sid2 = info["sid"], info2["sid"]
-            if sid1 in dedups or sid2 in dedups:
+            if sid1 not in stations or sid2 not in stations:
                 continue
             result = compare_stations(info["name"], info2["name"])
             if result == 0:
                 print(f"    {info['name']} ≠ {info2['name']}")
             elif result < 0:
-                dedups[sid2] = sid1
+                old_stops = stations[sid2]["stops"]
+                del stations[sid2]
+                stations[sid1]["stops"].extend(old_stops)
+                for stop_id in old_stops:
+                    stop_to_station[stop_id] = sid1
+                dedup_count += 1
                 print(f"    {info2['name']} → {info['name']}")
             else:
-                dedups[sid1] = sid2
+                old_stops = stations[sid1]["stops"]
+                del stations[sid1]
+                stations[sid2]["stops"].extend(old_stops)
+                for stop_id in old_stops:
+                    stop_to_station[stop_id] = sid2
+                dedup_count += 1
                 print(f"    {info['name']} → {info2['name']}")
 
-    print(f"  Total unique stations after filtering & dedup: {len(stations)}")
+    print(
+        f"  Total unique stations after filtering & dedup ({dedup_count} merged): {len(stations)}"
+    )
 
     print("\n  Extracting connections...")
 
@@ -345,58 +286,84 @@ def process(force: bool = False):
         zip_path = DATA_DIR / f"{feed_id}.zip"
         print(f"    Processing {FEEDS[feed_id]['name']}...")
 
-        connections = extract_connections(zip_path, stop_to_station)
+        feed_connections = 0
 
-        for key, time in connections.items():
-            if key not in all_connections or time < all_connections[key]:
-                all_connections[key] = time
+        with zipfile.ZipFile(zip_path) as zf:
+            with zf.open("stop_times.txt") as f:
+                reader = csv.DictReader(f.read().decode("utf-8").splitlines())
 
-        print(f"      Found {len(connections):,} connections")
+                current_trip = []
+                last_trip_id = None
+                last_sequence = -1
 
-    print(f"    Total unique connections: {len(all_connections):,}")
+                for row in reader:
+                    trip_id = row["trip_id"]
+                    sequence = int(row["stop_sequence"])
+                    if trip_id == last_trip_id:
+                        assert sequence > last_sequence, (
+                            f"Sequence not incrementing: {last_sequence} -> {sequence}"
+                        )
+                    last_sequence = sequence
 
-    # Make bidirectional and convert to output format
+                    if trip_id != last_trip_id and current_trip:
+                        for i in range(len(current_trip) - 1):
+                            for j in range(i + 1, len(current_trip)):
+                                sid_a, mins_a = current_trip[i]
+                                sid_b, mins_b = current_trip[j]
+                                travel_time = abs(mins_b - mins_a)
+                                if 1 <= travel_time <= 480:
+                                    if sid_a not in all_connections:
+                                        all_connections[sid_a] = {}
+                                    if (
+                                        sid_b not in all_connections[sid_a]
+                                        or travel_time < all_connections[sid_a][sid_b]
+                                    ):
+                                        all_connections[sid_a][sid_b] = travel_time
+                                        feed_connections += 1
+                        current_trip = []
+                        last_sequence = -1
+
+                    stop_id = row["stop_id"]
+                    station = stop_to_station.get(stop_id)
+                    if station and station in stations:
+                        mins = parse_time(row["arrival_time"])
+                        if not current_trip or current_trip[-1][0] != station:
+                            current_trip.append((station, mins))
+
+                    last_trip_id = trip_id
+
+        print(f"      Found {feed_connections:,} connections")
+
+    print("  Making bidirectional...")
+    for sid_a, destinations in list(all_connections.items()):
+        for sid_b, time in destinations.items():
+            if sid_b not in all_connections:
+                all_connections[sid_b] = {}
+            if sid_a not in all_connections[sid_b]:
+                all_connections[sid_b][sid_a] = time
+            else:
+                all_connections[sid_b][sid_a] = min(all_connections[sid_b][sid_a], time)
+
+    print(
+        f"    Total unique connections: {sum(len(d) for d in all_connections.values()):,}"
+    )
+
     print("\n  Building output...")
 
     station_list = list(stations.keys())
     station_to_idx = {s: i for i, s in enumerate(station_list)}
-    num_stations = len(station_list)
 
-    connection_times = [{} for _ in range(num_stations)]  # For deduplication
-
-    for (a_id, b_id), time in all_connections.items():
-        a_idx = station_to_idx.get(a_id)
-        b_idx = station_to_idx.get(b_id)
-
-        if a_idx is None or b_idx is None:
-            continue
-
-        # A -> B (deduplicate)
-        if (
-            b_idx not in connection_times[a_idx]
-            or time < connection_times[a_idx][b_idx]
-        ):
-            connection_times[a_idx][b_idx] = time
-
-        # B -> A (bidirectional, deduplicate)
-        if (
-            a_idx not in connection_times[b_idx]
-            or time < connection_times[b_idx][a_idx]
-        ):
-            connection_times[b_idx][a_idx] = time
-
-    # Convert to sorted lists
-    print("  Converting to output format...")
-
-    # Flatten edges: edges[i] = [dest1, dest2, ...], edgeTimes[i] = [time1, time2, ...]
     edges = []
     edgeTimes = []
 
-    for idx in range(num_stations):
-        conn_list = [[dest, t] for dest, t in connection_times[idx].items()]
-        conn_list.sort(key=lambda x: x[1])
-        edges.append([dest for dest, _ in conn_list])
-        edgeTimes.append([t for _, t in conn_list])
+    for sid_a in station_list:
+        a_idx = station_to_idx[sid_a]
+        edges.append([])
+        edgeTimes.append([])
+        for sid_b, time in all_connections.get(sid_a, {}).items():
+            b_idx = station_to_idx[sid_b]
+            edges[a_idx].append(b_idx)
+            edgeTimes[a_idx].append(time)
 
     # Build output
     names = [stations[sid]["name"] for sid in station_list]
@@ -417,8 +384,14 @@ def process(force: bool = False):
     with open(DATA_FILE, "w") as f:
         json.dump(output, f)
 
+    # Calculate gzipped size in memory
+    buf = io.BytesIO()
+    with gzip.GzipFile(fileobj=buf, mode="wb") as gz:
+        gz.write(json.dumps(output).encode("utf-8"))
+    gzipped_size = buf.tell()
+
     size = DATA_FILE.stat().st_size
-    print(f"\n  Written to {DATA_FILE} ({size:,} bytes)")
+    print(f"\n  Written to {DATA_FILE} ({size:,} bytes, {gzipped_size:,} gzipped)")
 
     # Find Berlin Hbf index for validation
     berlin_idx = None
