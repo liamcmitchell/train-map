@@ -280,7 +280,9 @@ def process(force: bool = False):
 
     print("\n  Extracting connections...")
 
-    all_connections = {}  # (station_a, station_b) -> min_time
+    connections = {}  # (station_a, station_b) -> min_time
+    for sid in stations:
+        connections[sid] = {}
 
     for feed_id in FEEDS:
         zip_path = DATA_DIR / f"{feed_id}.zip"
@@ -307,45 +309,43 @@ def process(force: bool = False):
 
                     if trip_id != last_trip_id and current_trip:
                         for i in range(len(current_trip) - 1):
+                            sid_a, mins_a = current_trip[i]
+                            destinations = connections[sid_a]
                             for j in range(i + 1, len(current_trip)):
-                                sid_a, mins_a = current_trip[i]
                                 sid_b, mins_b = current_trip[j]
-                                travel_time = abs(mins_b - mins_a)
-                                if 1 <= travel_time <= 480:
-                                    if sid_a not in all_connections:
-                                        all_connections[sid_a] = {}
-                                    if (
-                                        sid_b not in all_connections[sid_a]
-                                        or travel_time < all_connections[sid_a][sid_b]
-                                    ):
-                                        all_connections[sid_a][sid_b] = travel_time
-                                        feed_connections += 1
+                                travel_time = mins_b - mins_a
+                                destinations[sid_b] = min(
+                                    travel_time, destinations.get(sid_b, 99999)
+                                )
+                                feed_connections += 1
+
                         current_trip = []
                         last_sequence = -1
 
                     stop_id = row["stop_id"]
                     station = stop_to_station.get(stop_id)
-                    if station and station in stations:
+                    if station:
                         mins = parse_time(row["arrival_time"])
-                        if not current_trip or current_trip[-1][0] != station:
-                            current_trip.append((station, mins))
+                        current_trip.append((station, mins))
 
                     last_trip_id = trip_id
 
         print(f"      Found {feed_connections:,} connections")
 
-    print("  Making bidirectional...")
-    for sid_a, destinations in list(all_connections.items()):
+    # Make bidirectional
+    for sid_a, destinations in list(connections.items()):
         for sid_b, time in destinations.items():
-            if sid_b not in all_connections:
-                all_connections[sid_b] = {}
-            if sid_a not in all_connections[sid_b]:
-                all_connections[sid_b][sid_a] = time
+            if sid_a not in connections[sid_b]:
+                connections[sid_b][sid_a] = time
             else:
-                all_connections[sid_b][sid_a] = min(all_connections[sid_b][sid_a], time)
+                connections[sid_b][sid_a] = min(connections[sid_b][sid_a], time)
+
+    # Remove any link to self
+    for sid_a, destinations in list(connections.items()):
+        destinations.pop(sid_a, None)
 
     print(
-        f"    Total unique connections: {sum(len(d) for d in all_connections.values()):,}"
+        f"    Total unique connections: {sum(len(d) for d in connections.values()):,}"
     )
 
     print("\n  Building output...")
@@ -353,21 +353,21 @@ def process(force: bool = False):
     station_list = list(stations.keys())
     station_to_idx = {s: i for i, s in enumerate(station_list)}
 
+    names = []
+    coords = []
     edges = []
     edgeTimes = []
 
     for sid_a in station_list:
-        a_idx = station_to_idx[sid_a]
+        idx_a = station_to_idx[sid_a]
+        names.append(stations[sid_a]["name"])
+        coords.append([stations[sid_a]["lat"], stations[sid_a]["lon"]])
         edges.append([])
         edgeTimes.append([])
-        for sid_b, time in all_connections.get(sid_a, {}).items():
-            b_idx = station_to_idx[sid_b]
-            edges[a_idx].append(b_idx)
-            edgeTimes[a_idx].append(time)
-
-    # Build output
-    names = [stations[sid]["name"] for sid in station_list]
-    coords = [[stations[sid]["lat"], stations[sid]["lon"]] for sid in station_list]
+        for sid_b, time in connections[sid_a].items():
+            idx_b = station_to_idx[sid_b]
+            edges[idx_a].append(idx_b)
+            edgeTimes[idx_a].append(time)
 
     version = get_version_from_feeds()
     print(f"  Feed version: {version}")

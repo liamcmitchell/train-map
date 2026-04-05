@@ -1,3 +1,16 @@
+if (location.hostname === "localhost") {
+	const loaded = new Date().toUTCString()
+	async function check() {
+		const res = await fetch('/app.js', {
+			method: "HEAD",
+			headers: { 'If-Modified-Since': loaded }
+		})
+		if (res.status === 200) return location.reload()
+		setTimeout(check, 1000)
+	}
+	check()
+};
+
 let map;
 let data;
 let markers = {};
@@ -88,6 +101,7 @@ function initMarkers() {
 		marker.addTo(map);
 
 		const hitArea = L.circleMarker([lat, lon], {
+			pane: "markerPane",
 			radius: 12,
 			fillColor: "transparent",
 			fillOpacity: 0,
@@ -139,7 +153,7 @@ function updateMarkers() {
 }
 
 function getTimeColor(minutes) {
-	const hue = 90 - Math.pow(minutes / 360, 0.4) * 90;
+	const hue = 90 - Math.pow(minutes / 360, 0.6) * 90;
 	return `hsl(${Math.max(0, hue)}, 70%, 50%)`;
 }
 
@@ -325,7 +339,7 @@ function selectStation(index, center = true, animate = true) {
 	markers[index].openTooltip();
 
 	if (center) {
-		map.setView([lat, lon], 10, { animate });
+		map.setView([lat, lon], 8, { animate });
 	}
 
 	document.getElementById("search-input").value = name;
