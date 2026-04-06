@@ -21,7 +21,7 @@ let selectedStation = null;
 let connectedStations = new Map();
 let hoverStation = null;
 let hoverTime = 0;
-let zoom = 6;
+let zoom = 7;
 
 async function init() {
 	const loading = document.getElementById("loading");
@@ -73,6 +73,7 @@ function initMap() {
 		'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
 		'Train data: <a href="https://gtfs.de/">GTFS.de</a> <a href="https://creativecommons.org/licenses/by/4.0/">CC BY 4.0</a>',
 		data.version,
+		'<a href="https://github.com/liamcmitchell/train-map">Source</a>'
 	].join(" | ");
 
 	L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
