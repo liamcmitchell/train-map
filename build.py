@@ -111,6 +111,14 @@ def is_sub_station(name: str) -> bool:
     return any(x in name.lower() for x in NON_MAIN)
 
 
+def merge_into(stations: dict, stop_to_station: dict, source_sid: str, target_sid: str):
+    stations[target_sid]["stops"].update(stations[source_sid]["stops"])
+    stations[target_sid]["names"].update(stations[source_sid]["names"])
+    del stations[source_sid]
+    for stop_id in stations[target_sid]["stops"]:
+        stop_to_station[stop_id] = target_sid
+
+
 def normalize_station_name(name: str) -> set[str]:
     """Return set of normalized words from station name."""
     import unicodedata
@@ -220,23 +228,28 @@ def process(force: bool = False):
                         filtered_count += 1
                         continue
 
-                    if parent:
-                        stop_to_station[stop_id] = parent
-                        if parent in stations:
-                            stations[parent]["stops"].append(stop_id)
-
-                    elif stop_id not in stations:
+                    if stop_id not in stations:
                         stations[stop_id] = {
                             "sid": stop_id,
                             "name": name,
                             "lat": round(float(row["stop_lat"]), 5),
                             "lon": round(float(row["stop_lon"]), 5),
-                            "stops": [stop_id],
+                            "stops": {stop_id},
+                            "names": {name},
+                            "parent": parent,
                         }
                         stop_to_station[stop_id] = stop_id
 
     if filtered_count > 0:
         print(f"  Filtered out {filtered_count} stations")
+
+    print("  Merging parent-child stations...")
+    parent_child_merged = 0
+    for stop_id, station in list(stations.items()):
+        if parent := stop_to_station.get(station.get("parent")):
+            merge_into(stations, stop_to_station, stop_id, parent)
+            parent_child_merged += 1
+    print(f"    Merged {parent_child_merged} parent-child stations")
 
     PROXIMITY_THRESHOLD_KM = 0.15
 
@@ -259,19 +272,11 @@ def process(force: bool = False):
             if result == 0:
                 print(f"    {info['name']} ≠ {info2['name']}")
             elif result < 0:
-                old_stops = stations[sid2]["stops"]
-                del stations[sid2]
-                stations[sid1]["stops"].extend(old_stops)
-                for stop_id in old_stops:
-                    stop_to_station[stop_id] = sid1
+                merge_into(stations, stop_to_station, sid2, sid1)
                 dedup_count += 1
                 print(f"    {info2['name']} → {info['name']}")
             else:
-                old_stops = stations[sid1]["stops"]
-                del stations[sid1]
-                stations[sid2]["stops"].extend(old_stops)
-                for stop_id in old_stops:
-                    stop_to_station[stop_id] = sid2
+                merge_into(stations, stop_to_station, sid1, sid2)
                 dedup_count += 1
                 print(f"    {info['name']} → {info2['name']}")
 
@@ -351,6 +356,7 @@ def process(force: bool = False):
 
     print("\n  Building output...")
 
+    # Using separate arrays for better compression.
     station_list = list(stations.keys())
     station_to_idx = {s: i for i, s in enumerate(station_list)}
 
@@ -358,13 +364,20 @@ def process(force: bool = False):
     coords = []
     edges = []
     edgeTimes = []
+    altNames = []
+    altNameIds = []
 
     for sid_a in station_list:
         idx_a = station_to_idx[sid_a]
-        names.append(stations[sid_a]["name"])
+        main_name = stations[sid_a]["name"]
+        names.append(main_name)
         coords.append([stations[sid_a]["lat"], stations[sid_a]["lon"]])
         edges.append([])
         edgeTimes.append([])
+        for alt_name in stations[sid_a]["names"]:
+            if alt_name != main_name:
+                altNames.append(alt_name)
+                altNameIds.append(idx_a)
         for sid_b, time in connections[sid_a].items():
             idx_b = station_to_idx[sid_b]
             edges[idx_a].append(idx_b)
@@ -379,6 +392,8 @@ def process(force: bool = False):
         "coords": coords,
         "edges": edges,
         "edgeTimes": edgeTimes,
+        "altNames": altNames,
+        "altNameIds": altNameIds,
     }
 
     # Write

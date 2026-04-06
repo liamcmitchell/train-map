@@ -203,6 +203,8 @@ function initSearch() {
 	let highlightedIndex = -1;
 	let currentMatches = [];
 
+	const collator = new Intl.Collator(undefined, { sensitivity: "base" });
+
 	function fuzzyScore(name, query) {
 		const lowerName = name.toLowerCase();
 		const lowerQuery = query.toLowerCase();
@@ -211,7 +213,7 @@ function initSearch() {
 		let lastMatchIdx = -1;
 
 		for (let i = 0; i < lowerName.length && queryIdx < lowerQuery.length; i++) {
-			if (lowerName[i] === lowerQuery[queryIdx]) {
+			if (collator.compare(lowerName[i], lowerQuery[queryIdx]) === 0) {
 				score += 1;
 				if (lastMatchIdx === i - 1) score += 0.5;
 				if (i === 0 || lowerName[i - 1] === " ") score += 1;
@@ -233,10 +235,18 @@ function initSearch() {
 		}
 
 		const scored = [];
+
 		for (let i = 0; i < data.names.length; i++) {
 			const score = fuzzyScore(data.names[i], query);
 			if (score >= 0) {
-				scored.push({ index: i, score });
+				scored.push({ index: i, score, name: data.names[i] });
+			}
+		}
+
+		for (let i = 0; i < data.altNames.length; i++) {
+			const score = fuzzyScore(data.altNames[i], query);
+			if (score >= 0) {
+				scored.push({ index: data.altNameIds[i], score, name: data.altNames[i] });
 			}
 		}
 
@@ -244,12 +254,21 @@ function initSearch() {
 			if (b.score !== a.score) return b.score - a.score;
 			return (data.edges[b.index]?.length || 0) - (data.edges[a.index]?.length || 0);
 		});
-		currentMatches = scored.slice(0, 10).map((s) => s.index);
+
+		const seenStations = new Set();
+		currentMatches = [];
+		for (const result of scored) {
+			if (!seenStations.has(result.index)) {
+				currentMatches.push(result);
+				seenStations.add(result.index);
+			}
+			if (currentMatches.length >= 10) break;
+		}
 
 		results.innerHTML = currentMatches
 			.map(
-				(i) =>
-					`<div class="search-result" data-index="${i}" tabindex="0">${data.names[i]}</div>`,
+				(r) =>
+					`<div class="search-result" data-index="${r.index}" tabindex="0">${r.name}</div>`,
 			)
 			.join("");
 
@@ -290,7 +309,7 @@ function initSearch() {
 			highlightedIndex >= 0 &&
 			currentMatches[highlightedIndex] !== undefined
 		) {
-			selectStation(currentMatches[highlightedIndex]);
+			selectStation(currentMatches[highlightedIndex].index);
 			results.classList.remove("active");
 			currentMatches = [];
 			highlightedIndex = -1;
@@ -349,6 +368,13 @@ function initSearch() {
 					selectHighlighted();
 					break;
 			}
+		}
+	});
+
+	results.addEventListener("focusin", (e) => {
+		if (e.target.classList.contains("search-result")) {
+			const items = [...results.querySelectorAll(".search-result")];
+			highlightedIndex = items.indexOf(e.target);
 		}
 	});
 
