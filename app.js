@@ -1,19 +1,22 @@
 if (location.hostname === "localhost") {
-	const loaded = new Date().toUTCString()
+	const loaded = new Date().toUTCString();
 	async function check() {
-		const res = await fetch('/app.js', {
+		const res = await fetch("/app.js", {
 			method: "HEAD",
-			headers: { 'If-Modified-Since': loaded }
-		})
-		if (res.status === 200) return location.reload()
-		setTimeout(check, 1000)
+			headers: { "If-Modified-Since": loaded },
+		});
+		if (res.status === 200) return location.reload();
+		setTimeout(check, 1000);
 	}
-	check()
-};
+	check();
+}
 
 let map;
+let canvasRenderer;
+let svgRenderer;
 let data;
 let markers = {};
+let visibleMarkers = [];
 let selectedStation = null;
 let connectedStations = new Map();
 let hoverStation = null;
@@ -62,7 +65,9 @@ function updateHash() {
 }
 
 function initMap() {
-	map = L.map("map", { preferCanvas: true }).setView([51.1657, 10.4515], zoom);
+	map = L.map("map").setView([51.1657, 10.4515], zoom);
+	canvasRenderer = L.canvas();
+	svgRenderer = L.svg();
 
 	const attribution = [
 		'Map data: &copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
@@ -85,71 +90,81 @@ function initMap() {
 }
 
 function initMarkers() {
-	const names = data.names;
-	const coords = data.coords;
-
-	for (let i = 0; i < names.length; i++) {
-		const [lat, lon] = coords[i];
-
-		const marker = L.circleMarker([lat, lon], getMarkerStyle(i));
-		marker.bindTooltip(names[i], {
-			permanent: false,
-			direction: "top",
-			offset: [0, -8],
-		});
-		markers[i] = marker;
-		marker.addTo(map);
-
-		const hitArea = L.circleMarker([lat, lon], {
-			pane: "markerPane",
-			radius: 12,
-			fillColor: "transparent",
-			fillOpacity: 0,
-			stroke: false,
-			interactive: true,
-		});
-
-		hitArea.on("click", (e) => {
-			L.DomEvent.stopPropagation(e);
-			marker.openTooltip();
-
-			if (selectedStation === i) {
-				return;
-			}
-
-			if (
-				connectedStations.has(i) &&
-				hoverStation === i &&
-				Date.now() - hoverTime < 20
-			) {
-				// We're probably on mobile, don't select connected station on first click.
-				return;
-			}
-
-			selectStation(i, false, false);
-		});
-
-		hitArea.on("mouseover", () => {
-			hoverStation = i;
-			hoverTime = Date.now();
-			marker.setStyle(getMarkerStyle(i));
-			marker.openTooltip();
-		});
-
-		hitArea.on("mouseout", () => {
-			hoverStation = null;
-			marker.closeTooltip();
-			marker.setStyle(getMarkerStyle(i));
-		});
-
-		hitArea.addTo(map);
+	for (let i = 0; i < data.names.length; i++) {
+		markers[i] = createMarker(i);
 	}
 }
 
-function updateMarkers() {
-	for (let i = 0; i < data.names.length; i++) {
-		markers[i].setStyle(getMarkerStyle(i));
+function createMarker(i, visible, time) {
+	const marker = L.circleMarker(data.coords[i], {
+		interactive: true,
+		renderer: visible ? svgRenderer : canvasRenderer,
+	});
+	marker.i = i;
+	marker.visible = visible;
+	updateMarkerStyle(marker);
+
+	const tooltip =
+		visible && connectedStations.has(i)
+			? `${data.names[i]}: ${formatTime(time)}`
+			: data.names[i];
+	marker.bindTooltip(tooltip, {
+		permanent: false,
+		direction: "top",
+		offset: [0, -8],
+	});
+
+	marker.on("click", onMarkerClick, marker);
+	marker.on("mouseover", onMarkerMouseOver, marker);
+	marker.on("mouseout", onMarkerMouseOut, marker);
+
+	marker.addTo(map);
+
+	return marker;
+}
+
+function onMarkerClick(e) {
+	const marker = this;
+	const i = marker.i;
+	L.DomEvent.stopPropagation(e);
+	marker.openTooltip();
+
+	if (selectedStation === i) {
+		return;
 	}
+
+	if (
+		connectedStations.has(i) &&
+		hoverStation === i &&
+		Date.now() - hoverTime < 20
+	) {
+		// We're probably on mobile, don't select connected station on first click.
+		return;
+	}
+
+	selectStation(i, false, false);
+}
+
+function onMarkerMouseOver() {
+	const marker = this;
+	const i = marker.i;
+	hoverStation = i;
+	hoverTime = Date.now();
+	updateMarkerStyle(marker);
+	marker.openTooltip();
+}
+
+function onMarkerMouseOut() {
+	const marker = this;
+	const i = marker.i;
+	hoverStation = null;
+	marker.closeTooltip();
+	updateMarkerStyle(marker);
+}
+
+function updateMarkers() {
+	Object.values(markers).forEach(updateMarkerStyle);
+	visibleMarkers.forEach(updateMarkerStyle);
 }
 
 function getTimeColor(minutes) {
@@ -157,29 +172,30 @@ function getTimeColor(minutes) {
 	return `hsl(${Math.max(0, hue)}, 70%, 50%)`;
 }
 
-function getMarkerStyle(i) {
+function updateMarkerStyle(marker) {
+	const { i, visible } = marker;
 	const hover = hoverStation === i;
-	const selected = selectedStation === i;
-	const connected = connectedStations.has(i);
-	const visible = selected || connected;
+	const selected = visible && selectedStation === i;
+	const connected = visible && connectedStations.has(i);
+	const opacity = Number(visible || hover);
 	const radius = Math.max(
-		visible ? 3 : 0.5,
-		Math.min(16, zoom) - (visible ? 6 : 10),
+		visible ? 2.5 : 0.5,
+		Math.min(16, zoom) - (visible ? 6 : 8),
 	);
-	const weight = hover ? 2 : visible ? 1 : 0;
-	const opacity = visible ? 1 : Math.max(0, Math.min(1, zoom / 4 - 1));
-	return {
-		radius: radius + weight / 2,
+	const weight = visible && !hover ? 1 : 3;
+	const fillOpacity = visible ? 1 : Math.max(0, Math.min(1, zoom / 4 - 1));
+	marker.setStyle({
+		radius: radius + opacity * (weight / 2),
 		fillColor: selected
 			? "#0078A8"
 			: connected
 				? getTimeColor(connectedStations.get(i))
 				: "#333",
-		fillOpacity: opacity,
+		fillOpacity,
 		color: hover ? "#fff" : "#333",
 		opacity,
 		weight,
-	};
+	});
 }
 
 function initSearch() {
@@ -332,17 +348,9 @@ function selectStation(index, center = true, animate = true) {
 	clearSelection();
 	selectedStation = index;
 
-	const [lat, lon] = data.coords[index];
-	const name = data.names[index];
-
-	markers[index].setStyle(getMarkerStyle(index));
-	markers[index].openTooltip();
-
-	if (center) {
-		map.setView([lat, lon], 8, { animate });
-	}
-
-	document.getElementById("search-input").value = name;
+	const selectedMarker = createMarker(index, true);
+	selectedMarker.openTooltip();
+	visibleMarkers.push(selectedMarker);
 
 	const edges = data.edges[index];
 	const times = data.edgeTimes[index];
@@ -353,10 +361,15 @@ function selectStation(index, center = true, animate = true) {
 
 		connectedStations.set(destIdx, time);
 
-		markers[destIdx].setStyle(getMarkerStyle(destIdx));
-
-		markers[destIdx].setTooltipContent(`${data.names[destIdx]}: ${formatTime(time)}`);
+		const connectedMarker = createMarker(destIdx, true, time);
+		visibleMarkers.push(connectedMarker);
 	}
+
+	if (center) {
+		map.setView(data.coords[index], 9, { animate });
+	}
+
+	document.getElementById("search-input").value = data.names[index];
 
 	updateHash();
 }
@@ -371,16 +384,13 @@ function formatTime(minutes) {
 function clearSelection() {
 	if (selectedStation === null) return;
 
-	const cleared = [selectedStation, ...connectedStations.keys()];
-
 	selectedStation = null;
 	connectedStations.clear();
 
-	cleared.forEach((idx) => {
-		markers[idx].setStyle(getMarkerStyle(idx));
-		markers[idx].closeTooltip();
-		markers[idx].setTooltipContent(data.names[idx]);
+	visibleMarkers.forEach((marker) => {
+		marker.removeFrom(map);
 	});
+	visibleMarkers = [];
 
 	document.getElementById("search-input").value = "";
 
