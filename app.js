@@ -156,7 +156,6 @@ function onMarkerMouseOver() {
 
 function onMarkerMouseOut() {
 	const marker = this;
-	const i = marker.i;
 	hoverStation = null;
 	marker.closeTooltip();
 	updateMarkerStyle(marker);
@@ -204,6 +203,27 @@ function initSearch() {
 	let highlightedIndex = -1;
 	let currentMatches = [];
 
+	function fuzzyScore(name, query) {
+		const lowerName = name.toLowerCase();
+		const lowerQuery = query.toLowerCase();
+		let queryIdx = 0;
+		let score = 0;
+		let lastMatchIdx = -1;
+
+		for (let i = 0; i < lowerName.length && queryIdx < lowerQuery.length; i++) {
+			if (lowerName[i] === lowerQuery[queryIdx]) {
+				score += 1;
+				if (lastMatchIdx === i - 1) score += 0.5;
+				if (i === 0 || lowerName[i - 1] === " ") score += 1;
+				lastMatchIdx = i;
+				queryIdx++;
+			}
+		}
+
+		if (queryIdx < lowerQuery.length) return -1;
+		return score;
+	}
+
 	function updateResults(query) {
 		if (query.length < 2) {
 			results.classList.remove("active");
@@ -212,14 +232,19 @@ function initSearch() {
 			return;
 		}
 
-		currentMatches = [];
-		const lowerQuery = query.toLowerCase();
+		const scored = [];
 		for (let i = 0; i < data.names.length; i++) {
-			if (data.names[i].toLowerCase().includes(lowerQuery)) {
-				currentMatches.push(i);
-				if (currentMatches.length >= 10) break;
+			const score = fuzzyScore(data.names[i], query);
+			if (score >= 0) {
+				scored.push({ index: i, score });
 			}
 		}
+
+		scored.sort((a, b) => {
+			if (b.score !== a.score) return b.score - a.score;
+			return (data.edges[b.index]?.length || 0) - (data.edges[a.index]?.length || 0);
+		});
+		currentMatches = scored.slice(0, 10).map((s) => s.index);
 
 		results.innerHTML = currentMatches
 			.map(

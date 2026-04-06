@@ -223,7 +223,8 @@ def process(force: bool = False):
                     if parent:
                         stop_to_station[stop_id] = parent
                         if parent in stations:
-                            stations[parent].setdefault("stops", []).append(stop_id)
+                            stations[parent]["stops"].append(stop_id)
+
                     elif stop_id not in stations:
                         stations[stop_id] = {
                             "sid": stop_id,
